@@ -1,0 +1,61 @@
+diff --git a/tools/PbdViewer/Uitils/PbClass/PbFile.cs b/tools/PbdViewer/Uitils/PbClass/PbFile.cs
+index 27bd8a2..17bd8d6 100644
+--- a/tools/PbdViewer/Uitils/PbClass/PbFile.cs
++++ b/tools/PbdViewer/Uitils/PbClass/PbFile.cs
+@@ -179,36 +179,31 @@ namespace PbdViewer.Uitils.PbClass
+ 			if (flag)
+ 			{
+ 				num += (Project.IsUnicode ? 1536 : 1024);
+-				stream.Seek(num, SeekOrigin.Begin);
+-				int num2 = stream.Read(array, 0, 512);
+-				if (num2 != 512 || !Encoding.ASCII.GetString(array, 0, 4).Equals("NOD*"))
++				// NOD 块间经 left(@4)/parent(@8)/right(@12) 三指针成图 (实测 CP_BZZK.DLL 等
++				// 多 NOD 库经 left 回链, 单向遍历会 seek 到非 NOD 位置抛"格式错误") ——
++				// 改为三指针图遍历 + 去重 (2026-10-02, 见 docs/24)
++				List<long> queue = new List<long> { num };
++				HashSet<long> hashSet2 = new HashSet<long>();
++				while (queue.Count > 0)
+ 				{
+-					throw new Exception("格式错误");
+-				}
+-				list.Add(num);
+-				uint uInt = BufferHelper.GetUInt(array, 4L);
+-				uint uInt2 = BufferHelper.GetUInt(array, 12L);
+-				while (uInt != 0)
+-				{
+-					stream.Seek(uInt, SeekOrigin.Begin);
+-					num2 = stream.Read(array, 0, 512);
+-					if (num2 != 512 || !Encoding.ASCII.GetString(array, 0, 4).Equals("NOD*"))
++					long nodePos = queue[queue.Count - 1];
++					queue.RemoveAt(queue.Count - 1);
++					if (nodePos <= 0 || hashSet2.Contains(nodePos) || nodePos >= stream.Length)
+ 					{
+-						throw new Exception("格式错误");
++						continue;
+ 					}
+-					list.Add(uInt);
+-					uInt = BufferHelper.GetUInt(array, 4L);
+-				}
+-				while (uInt2 != 0)
+-				{
+-					stream.Seek(uInt2, SeekOrigin.Begin);
+-					num2 = stream.Read(array, 0, 512);
+-					if (num2 != 512 || !Encoding.ASCII.GetString(array, 0, 4).Equals("NOD*"))
++					stream.Seek(nodePos, SeekOrigin.Begin);
++					int num3 = stream.Read(array, 0, 512);
++					if (num3 < 24 || !Encoding.ASCII.GetString(array, 0, 4).Equals("NOD*"))
+ 					{
+-						throw new Exception("格式错误");
++						continue;
++					}
++					hashSet2.Add(nodePos);
++					list.Add(nodePos);
++					for (int num4 = 4; num4 <= 12; num4 += 4)
++					{
++						queue.Add((long)BufferHelper.GetUInt(array, num4));
+ 					}
+-					list.Add(uInt2);
+-					uInt2 = BufferHelper.GetUInt(array, 12L);
+ 				}
+ 			}
+ 			return list;

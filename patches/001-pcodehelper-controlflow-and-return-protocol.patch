@@ -1,0 +1,300 @@
+diff --git a/tools/PbdViewer/Uitils/PCodeHelper.cs b/tools/PbdViewer/Uitils/PCodeHelper.cs
+index 7ef3cb5..77fcc14 100644
+--- a/tools/PbdViewer/Uitils/PCodeHelper.cs
++++ b/tools/PbdViewer/Uitils/PCodeHelper.cs
+@@ -137,8 +137,10 @@ namespace PbdViewer.Uitils
+ 			ParseForNext(list, areas);
+ 			ParseDoLoop(list, areas);
+ 			ParseExitContinue(list, areas);
++			ParseIfMerge(list);
+ 			ParseIfElse(list);
+-			ParseGoto(list);
++			ParseSingleLineIf(list);
++			ParseGoto(list, areas);
+ 			ParseEventReturn(list);
+ 			ParseIndent(pbFunction, list);
+ 		}
+@@ -470,7 +472,8 @@ namespace PbdViewer.Uitils
+ 					CodeLine firstVailiablePreCodeLine = GetFirstVailiablePreCodeLine(value2.PreCodeLine);
+ 					if (((firstVailiablePreCodeLine != null) ? firstVailiablePreCodeLine.SCode : null) == "else ")
+ 					{
+-						firstVailiablePreCodeLine.SCode += value2.SCode;
++						// "else " + "if COND then" => "elseif COND then" (PB 源码风格, 消 elseif→0 伪影)
++						firstVailiablePreCodeLine.SCode = string.Format("elseif {0} then", value2.Condition);
+ 						value2.SCode = "";
+ 						hashSet.Add(num);
+ 					}
+@@ -499,14 +502,227 @@ namespace PbdViewer.Uitils
+ 			}
+ 		}
+ 
+-		private static void ParseGoto(Dictionary<ushort, CodeLine> list)
++		private static void ParseSingleLineIf(Dictionary<ushort, CodeLine> list)
+ 		{
++			// PB 单行 if 形态: 体=唯一一条简单语句 => `if COND then STMT` (真源: IF isvalid(X) THEN destroy X)
++			// 仅摘自己这条 if 的 "end if" 标签, 不动嵌套外层的标签
+ 			foreach (CodeLine value in list.Values)
+ 			{
+-				if (!string.IsNullOrEmpty(value.SCode))
++				if (string.IsNullOrEmpty(value.SCode) || !value.SCode.Trim().StartsWith("if ") || !value.SCode.TrimEnd().EndsWith("then"))
+ 				{
+-					JmpType jmpType = value.JmpType;
+-					int num = 1;
++					continue;
++				}
++				CodeLine codeLine = FirstNonBlankAfter(list, value);
++				if (codeLine == null || !IsSimpleStatement(codeLine.SCode))
++				{
++					continue;
++				}
++				CodeLine codeLine2 = FirstNonBlankAfter(list, codeLine);
++				if (codeLine2 == null || codeLine2.PCodePositon != value.JmpPositon)
++				{
++					continue;
++				}
++				value.SCode = value.SCode.TrimEnd() + " " + codeLine.SCode.Trim();
++				codeLine.SCode = "";
++				int num = codeLine2.LabelSCode.FindIndex((string l) => l.Trim().Equals("end if"));
++				if (num >= 0)
++				{
++					codeLine2.LabelSCode.RemoveAt(num);
++				}
++			}
++		}
++
++		private static CodeLine FirstNonBlankAfter(Dictionary<ushort, CodeLine> list, CodeLine from)
++		{
++			CodeLine codeLine = from;
++			while ((codeLine = codeLine.NextCodeLine) != null && string.IsNullOrEmpty(codeLine.SCode))
++			{
++			}
++			return codeLine;
++		}
++
++		private static bool IsSimpleStatement(string s)
++		{
++			if (string.IsNullOrWhiteSpace(s))
++			{
++				return false;
++			}
++			string text = s.Trim().ToLowerInvariant();
++			string[] array = new string[15] { "if ", "for ", "next ", "do ", "loop ", "choose ", "case ", "else", "end ", "try ", "catch ", "finally ", "goto ", "select ", "declare " };
++			foreach (string text2 in array)
++			{
++				if (text.StartsWith(text2))
++				{
++					return false;
++				}
++			}
++			return true;
++		}
++
++		private static void ParseGoto(Dictionary<ushort, CodeLine> list, List<CodeArea> areas)
++		{
++			// 此时 for/do/choose/if 均已结构化; 残余跳转 = 常真条件环(do while true)、
++			// 环内 continue/exit、源码真 goto。配对实测定案见 docs/22。
++			List<CodeLine> ordered = new List<CodeLine>(list.Values);
++			Dictionary<ushort, int> idx = new Dictionary<ushort, int>();
++			for (int i = 0; i < ordered.Count; i++)
++			{
++				idx[ordered[i].PCodePositon] = i;
++			}
++			// pass 1: do-while-true 型环 — backward Jmp(回边) + 环体内 forward Jmp 落回边后继(=exit)
++			for (int i = 0; i < ordered.Count; i++)
++			{
++				CodeLine codeLine = ordered[i];
++				if (string.IsNullOrEmpty(codeLine.SCode) || codeLine.JmpType != JmpType.Jmp || codeLine.JmpPositon >= codeLine.PCodePositon)
++				{
++					continue;
++				}
++				int num;
++				if (!idx.TryGetValue(codeLine.JmpPositon, out num) || num >= i)
++				{
++					continue;
++				}
++				ushort afterLoop = (ushort)((i + 1 < ordered.Count) ? ordered[i + 1].PCodePositon : 0);
++				if (afterLoop == 0)
++				{
++					continue;
++				}
++				bool hasExit = false;
++				for (int j = num; j < i; j++)
++				{
++					CodeLine codeLine2 = ordered[j];
++					if (!string.IsNullOrEmpty(codeLine2.SCode) && codeLine2.JmpType == JmpType.Jmp && codeLine2.JmpPositon == afterLoop)
++					{
++						hasExit = true;
++						break;
++					}
++				}
++				if (!hasExit)
++				{
++					continue;
++				}
++				ordered[num].LabelSCode.Add("do while true ");
++				codeLine.SCode = "loop ";
++				codeLine.JmpType = JmpType.None;
++				for (int j = num; j < i; j++)
++				{
++					CodeLine codeLine2 = ordered[j];
++					if (!string.IsNullOrEmpty(codeLine2.SCode) && codeLine2.JmpType == JmpType.Jmp && codeLine2.JmpPositon == afterLoop)
++					{
++						codeLine2.SCode = "exit";
++						codeLine2.JmpType = JmpType.None;
++					}
++				}
++			}
++			// pass 2: 残余跳转分类
++			foreach (CodeLine value in list.Values)
++			{
++				if (string.IsNullOrEmpty(value.SCode) || value.JmpType == JmpType.None)
++				{
++					continue;
++				}
++				if (value.JmpType == JmpType.Jmp && value.JmpPositon < value.PCodePositon)
++				{
++					// backward Jmp 目标为环头 => continue (PB 的 continue 在 do 环中即回跳)
++					CodeLine codeLine3 = list[value.JmpPositon];
++					bool flag = codeLine3.LabelSCode.Any((string l) => l.Trim().StartsWith("do")) || areas.Any((CodeArea a) => a.Start == codeLine3.PCodePositon);
++					if (flag)
++					{
++						value.SCode = "continue";
++						value.JmpType = JmpType.None;
++					}
++					continue;
++				}
++				if (value.JmpType == JmpType.JmpIfTrue && value.JmpPositon > value.PCodePositon)
++				{
++					// forward 条件真跳: 落在环末 => if COND then exit/continue (PB: if x then exit)
++					CodeArea codeArea = FindInnermostArea(areas, value.PCodePositon);
++					if (codeArea != null && value.PCodePositon >= codeArea.Start && value.PCodePositon <= codeArea.End)
++					{
++						if (list[value.JmpPositon].PreCodeLine.PCodePositon == codeArea.End)
++						{
++							value.SCode = string.Format("if {0} then exit", value.Condition);
++							value.JmpType = JmpType.None;
++						}
++						else if (list[value.JmpPositon].PCodePositon == codeArea.End)
++						{
++							value.SCode = string.Format("if {0} then continue", value.Condition);
++							value.JmpType = JmpType.None;
++						}
++					}
++				}
++			}
++		}
++
++		private static CodeArea FindInnermostArea(List<CodeArea> areas, int pos)
++		{
++			CodeArea codeArea = null;
++			foreach (CodeArea item in areas)
++			{
++				if (pos >= item.Start && pos <= item.End && (codeArea == null || item.End - item.Start < codeArea.End - codeArea.Start))
++				{
++					codeArea = item;
++				}
++			}
++			return codeArea;
++		}
++
++		private static void ParseIfMerge(Dictionary<ushort, CodeLine> list)
++		{
++			// 编译器把复合条件拆成顺序条件跳转:
++			//   `if A and B`  => [JmpIfFalse(A)→T][JmpIfFalse(B)→T] 同目标相邻对
++			//   `if A or B`   => [JmpIfTrue(A)→X][JmpIfFalse(B)→E] 真跳目标=紧随下一非空行
++			// 还原为单个 if; 循环到不动点支持任意项数
++			List<CodeLine> ordered = new List<CodeLine>(list.Values);
++			bool flag2 = true;
++			while (flag2)
++			{
++				flag2 = false;
++				// 预生成下一非空行位置
++				Dictionary<CodeLine, ushort> nextNonBlank = new Dictionary<CodeLine, ushort>();
++				for (int i = 0; i < ordered.Count; i++)
++				{
++					if (string.IsNullOrEmpty(ordered[i].SCode))
++					{
++						continue;
++					}
++					for (int j = i + 1; j < ordered.Count; j++)
++					{
++						if (!string.IsNullOrEmpty(ordered[j].SCode))
++						{
++							nextNonBlank[ordered[i]] = ordered[j].PCodePositon;
++							break;
++						}
++					}
++				}
++				CodeLine codeLine = null;
++				foreach (CodeLine value in list.Values)
++				{
++					if (string.IsNullOrEmpty(value.SCode))
++					{
++						continue;
++					}
++					if (codeLine != null && codeLine.JmpType == JmpType.JmpIfFalse && value.JmpType == JmpType.JmpIfFalse && codeLine.JmpPositon > codeLine.PCodePositon && value.JmpPositon > value.PCodePositon && codeLine.JmpPositon == value.JmpPositon)
++					{
++						value.Condition = string.Format("({0}) and ({1})", codeLine.Condition, value.Condition);
++						codeLine.SCode = "";
++						codeLine.JmpType = JmpType.None;
++						codeLine.Condition = null;
++						flag2 = true;
++						codeLine = null;
++						continue;
++					}
++					if (codeLine != null && codeLine.JmpType == JmpType.JmpIfTrue && value.JmpType == JmpType.JmpIfFalse && codeLine.JmpPositon > codeLine.PCodePositon && value.JmpPositon > value.PCodePositon && nextNonBlank.ContainsKey(value) && codeLine.JmpPositon == nextNonBlank[value])
++					{
++						value.Condition = string.Format("{0} or {1}", codeLine.Condition, value.Condition);
++						codeLine.SCode = "";
++						codeLine.JmpType = JmpType.None;
++						codeLine.Condition = null;
++						flag2 = true;
++						codeLine = null;
++						continue;
++					}
++					codeLine = value;
+ 				}
+ 			}
+ 		}
+@@ -515,7 +731,9 @@ namespace PbdViewer.Uitils
+ 		{
+ 			foreach (CodeLine value in list.Values)
+ 			{
+-				if (!value.SCode.Trim().StartsWith("if isvalid(::message) then goto "))
++				// PB9 渲染 "if isvalid(message) then goto X"; 旧版为 "::message" —— 两种都收
++				string s = value.SCode.Trim();
++				if (!s.StartsWith("if isvalid(message) then goto ") && !s.StartsWith("if isvalid(::message) then goto "))
+ 				{
+ 					continue;
+ 				}
+@@ -528,12 +746,25 @@ namespace PbdViewer.Uitils
+ 				if (firstVailiableNextCodeLine2 != null && firstVailiableNextCodeLine2.SCode.Trim().StartsWith("goto "))
+ 				{
+ 					CodeLine firstVailiableNextCodeLine3 = GetFirstVailiableNextCodeLine(firstVailiableNextCodeLine2);
+-					if (firstVailiableNextCodeLine3 != null && firstVailiableNextCodeLine3.SCode.Trim().Equals("return ::message.returnvalue"))
++					if (firstVailiableNextCodeLine3 != null && (firstVailiableNextCodeLine3.SCode.Trim().Equals("return ::message.returnvalue") || firstVailiableNextCodeLine3.SCode.Trim().Equals("return message.returnvalue")))
+ 					{
+-						value.SCode = "";
+-						firstVailiableNextCodeLine.SCode = "";
+-						firstVailiableNextCodeLine2.SCode = "";
+-						firstVailiableNextCodeLine3.SCode = "";
++						if (GetFirstVailiableNextCodeLine(firstVailiableNextCodeLine3) == null)
++						{
++							// 事件尾声协议(函数末尾) — 折叠为空
++							value.SCode = "";
++							firstVailiableNextCodeLine.SCode = "";
++							firstVailiableNextCodeLine2.SCode = "";
++							firstVailiableNextCodeLine3.SCode = "";
++						}
++						else
++						{
++							// 函数中部显式 RETURN — 折叠协议但保留可见 return (真源有此语句)
++							value.SCode = "return";
++							value.JmpType = JmpType.None;
++							firstVailiableNextCodeLine.SCode = "";
++							firstVailiableNextCodeLine2.SCode = "";
++							firstVailiableNextCodeLine3.SCode = "";
++						}
+ 					}
+ 				}
+ 			}

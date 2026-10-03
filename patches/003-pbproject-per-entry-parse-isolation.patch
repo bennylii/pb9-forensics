@@ -1,0 +1,47 @@
+diff --git a/tools/PbdViewer/Uitils/PbClass/PbProject.cs b/tools/PbdViewer/Uitils/PbClass/PbProject.cs
+index d81f6b2..5b26147 100644
+--- a/tools/PbdViewer/Uitils/PbClass/PbProject.cs
++++ b/tools/PbdViewer/Uitils/PbClass/PbProject.cs
+@@ -80,19 +80,39 @@ namespace PbdViewer.Uitils.PbClass
+ 			{
+ 				foreach (PbEntry entry in file.Entries)
+ 				{
+-					entry.ParseObject();
++					// 逐条目隔离: 特殊格式对象(CANVAS/Soap代理等)会让单条解析抛
++					// "数组维度超过了支持的范围", 不能因此报废整库
++					try
++					{
++						entry.ParseObject();
++					}
++					catch (Exception)
++					{
++					}
+ 				}
+ 			}
+ 			PbEntry systemEntry = SystemEntry;
+ 			if (systemEntry != null)
+ 			{
+-				systemEntry.ParseInherit();
++				try
++				{
++					systemEntry.ParseInherit();
++				}
++				catch (Exception)
++				{
++				}
+ 			}
+ 			foreach (PbFile file2 in Files)
+ 			{
+ 				foreach (PbEntry entry2 in file2.Entries)
+ 				{
+-					entry2.ParseInherit();
++					try
++					{
++						entry2.ParseInherit();
++					}
++					catch (Exception)
++					{
++					}
+ 				}
+ 			}
+ 		}
